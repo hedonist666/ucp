@@ -1,4 +1,4 @@
-LDFLAGS += $(shell pkg-config --libs glib-2.0) -lpthread -lm -lunicorn
+LDFLAGS += $(shell pkg-config --libs glib-2.0) -lpthread -lm -lunicorn -g
 
 all: emu
 %: %.c 

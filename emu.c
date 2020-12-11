@@ -11,8 +11,10 @@ void hui() {
 
 
 char* get_file_contents(const char* fn) {
-    FILE* f = fopen(fn, "r");
-    int fd = fileno(f); 
+    static FILE* f;
+    static int fd;
+    f = fopen(fn, "r");
+    fd = fileno(f); 
     struct stat st;
     fstat(fd, &st);
     return mmap(NULL, st.st_size, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE, fd, 0);
@@ -38,45 +40,83 @@ const char* beautify(int flag, int type) {
 
 void map_and_write(uc_engine* uc, char* addr, char* data, int len, bool flush) {
     typedef struct MapNode {
-        long int start;
-        long int end;
+        char* start;
+        char* end;
+        char* data;
+        bool mapped;
         struct MapNode* next;
     } MapNode;
 
     static MapNode* maps = NULL;
     static MapNode* mapsEnd = NULL;
 
-    uc_err err;
-    if (len & 0x3ff ) {
-        long int old_len = len;
-        len += 0x400 - (len & 0x3ff);
-        printf("[*] Len (%d) is not divisible by 1024, changind to %d\n", old_len, len);
+    if (addr != NULL && data != NULL && len != 0) {
+        if (mapsEnd == NULL) {
+            maps = mapsEnd = malloc(sizeof(*maps));
+            mapsEnd->start = addr;
+            mapsEnd->end = addr + len;
+            mapsEnd->mapped = false;
+            mapsEnd->next = NULL;
+            mapsEnd->data = data;
+        }
+        else {
+            mapsEnd->next = malloc(sizeof(*maps));
+            mapsEnd->next->start = addr;
+            mapsEnd->next->end = addr + len;
+            mapsEnd->next->mapped = false;
+            mapsEnd = mapsEnd->next;
+            mapsEnd->next = NULL;
+            mapsEnd->data = data;
+        }
     }
-    err = uc_mem_map(uc, addr, len, UC_PROT_ALL);
-    if (err != UC_ERR_OK) {
-        printf("[!] Failed on uc_mem_map(uc, %p, %d, UC_PROT_ALL) with error returned: %u\n", addr, len, err);
-        exit(-1);
-    }
-    err = uc_mem_write(uc, addr, data, len);
-    if (err != UC_ERR_OK) {
-        printf("[!] Failed on uc_mem_write() with error returned: %u\n", err);
-        exit(-1);
-    }
-    if (mapsEnd == NULL) {
-        maps = mapsEnd = malloc(sizeof(*maps));
-        mapsEnd->start = addr;
-        mapsEnd->end = addr + len;
-    }
-    else {
-        mapsEnd->next = malloc(sizeof(*maps));
-        mapsEnd->next->start = addr;
-        mapsEnd->next->end = addr + len;
-        mapsEnd = mapsEnd->next;
-    }
+
     int i = 0;
     puts("[*] Current maps:");
+    if (maps == NULL) {
+        perror("[!] INTERNAL ERROR (map list is null)\n");
+        exit(-1);
+    }
     for (MapNode* e = maps; e != NULL; e=e->next) {
-        printf("%d: <%p, %p>\n", i, e->start, e->end);
+        if (e->mapped) printf("%d: <%p, %p>\n", i, e->start, e->end);
+        else printf("%d: <%p, %p> UNMAPPED\n", i, e->start, e->end);
+    }
+    if (flush) {
+        uc_err err;
+        puts("[*] MERGING MAPS TO ONE MEMORY BLOCK (maybe it is better to change algorithm)"); 
+        char* start = (char*)(-1);
+        char* end = (char*)(0);
+        for (MapNode* e = maps; e != NULL; e=e->next) {
+            if (e->start < start) start = e->start;
+            if (e->end > end) end = e->end;
+        }
+        unsigned long _start = start;
+        if (_start & 0x3ff) {
+            unsigned long old_start = start;
+            start -= (_start & 0x3ff);
+            printf("[*] Start (%p) is not divisible by 1024, changind to %p\n", old_start, start);
+        }
+        unsigned long len = end - start;
+        if (len & 0x3ff ) {
+            unsigned long old_len = len;
+            len += 0x400 - (len & 0x3ff);
+            printf("[*] Len (%d) is not divisible by 1024, changind to %d\n", old_len, len);
+        }
+        if ((len >> 10) & 1) {
+            len += 0x400;
+            printf("[Suka] Well, len/1024 must be even number sooo len=%d\n", len);
+        }
+        printf("[*] Creatin map from %p to %p\n", start, start + len);
+        err = uc_mem_map(uc, start, len, UC_PROT_ALL);
+        if (err != UC_ERR_OK) {
+            printf("[!] Failed on uc_mem_map(uc, %p, %d, UC_PROT_ALL) with error returned: %u\n", start, len, err);
+            exit(-1);
+        }
+        return;
+        err = uc_mem_write(uc, addr, data, len);
+        if (err != UC_ERR_OK) {
+            printf("[!] Failed on uc_mem_write() with error returned: %u\n", err);
+            exit(-1);
+        }
     }
 }
 
@@ -87,17 +127,16 @@ void prepare(const char* fn, uc_engine* uc) {
     printf("[*] Program Headers number: %d\n", ehdr->e_phnum);
     for (int i = 0; i < ehdr->e_phnum; ++i) {
         printf("Header %d: %s\n", i, beautify(phdr[i].p_type, 0));
-        /* TODO DUE TO MEMORY OVERLAP
         if (phdr[i].p_type == PT_PHDR) {
             puts("Found PT_PHDR, mapping it to vitrual mem...");
-            map_and_write(uc, phdr[i].p_vaddr, phdr, sizeof(phdr)*ehdr->e_phnum);
+            map_and_write(uc, phdr[i].p_vaddr, phdr, sizeof(phdr)*ehdr->e_phnum, false);
         }
-        */
         if (phdr[i].p_type == PT_LOAD) {
             puts("Found PT_LOAD, mapping it...");
             map_and_write(uc, phdr[i].p_vaddr, &mem[phdr[i].p_offset], phdr[i].p_memsz, false);
         }
     }
+    map_and_write(uc, NULL, NULL, 0, true);
     char* entry = ehdr->e_entry;
     printf("[*] Entry point is at %p\n", entry);
 }
@@ -107,6 +146,13 @@ int main(int argc, char** argv) {
     uc_engine* uc;
     uc_err err;
     uc_open(UC_ARCH_X86, UC_MODE_64, &uc);
+    /*
+    err = uc_mem_map(uc, 0x400000, 2 * 1024 * 1024, UC_PROT_ALL);
+    if (err != UC_ERR_OK) {
+        printf("[!] Failed on uc_mem_map(uc, %p, %d, UC_PROT_ALL) with error returned: %u\n", 0x400000, 2103296, err);
+        exit(-1);
+    }
+    */
     prepare(argv[1], uc);
     hui();
 }
