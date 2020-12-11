@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-
+#include <capstone/capstone.h>
 
 void hui() {
     printf("you are hacked by hedonist666");
@@ -38,6 +38,7 @@ const char* beautify(int flag, int type) {
 }
 
 
+//TODO
 void map_and_write(uc_engine* uc, char* addr, char* data, int len, bool flush) {
     typedef struct MapNode {
         char* start;
@@ -90,20 +91,18 @@ void map_and_write(uc_engine* uc, char* addr, char* data, int len, bool flush) {
             if (e->end > end) end = e->end;
         }
         unsigned long _start = start;
+        /* 
         if (_start & 0x3ff) {
             unsigned long old_start = start;
             start -= (_start & 0x3ff);
             printf("[*] Start (%p) is not divisible by 1024, changind to %p\n", old_start, start);
         }
+        */
         unsigned long len = end - start;
-        if (len & 0x3ff ) {
+        if (len & 0xfff) {
             unsigned long old_len = len;
-            len += 0x400 - (len & 0x3ff);
+            len += 0x1000 - (len & 0xfff);
             printf("[*] Len (%d) is not divisible by 1024, changind to %d\n", old_len, len);
-        }
-        if ((len >> 10) & 1) {
-            len += 0x400;
-            printf("[Suka] Well, len/1024 must be even number sooo len=%d\n", len);
         }
         printf("[*] Creatin map from %p to %p\n", start, start + len);
         err = uc_mem_map(uc, start, len, UC_PROT_ALL);
@@ -111,14 +110,21 @@ void map_and_write(uc_engine* uc, char* addr, char* data, int len, bool flush) {
             printf("[!] Failed on uc_mem_map(uc, %p, %d, UC_PROT_ALL) with error returned: %u\n", start, len, err);
             exit(-1);
         }
-        return;
-        err = uc_mem_write(uc, addr, data, len);
-        if (err != UC_ERR_OK) {
-            printf("[!] Failed on uc_mem_write() with error returned: %u\n", err);
-            exit(-1);
+        for (MapNode* e = maps; e != NULL; e=e->next) {
+            err = uc_mem_write(uc, e->start, e->data, e->end-e->start);
+            if (err != UC_ERR_OK) {
+                printf("[!] Failed on uc_mem_write() with error returned: %u\n", err);
+                exit(-1);
+            }
         }
+        puts("[*] Memory flushed (God bless)");
     }
 }
+
+void hook_code(uc_engine* uc, char* address, int size, void* user_data) {
+
+}
+
 
 void prepare(const char* fn, uc_engine* uc) {
     char* mem = get_file_contents(fn);
@@ -146,13 +152,6 @@ int main(int argc, char** argv) {
     uc_engine* uc;
     uc_err err;
     uc_open(UC_ARCH_X86, UC_MODE_64, &uc);
-    /*
-    err = uc_mem_map(uc, 0x400000, 2 * 1024 * 1024, UC_PROT_ALL);
-    if (err != UC_ERR_OK) {
-        printf("[!] Failed on uc_mem_map(uc, %p, %d, UC_PROT_ALL) with error returned: %u\n", 0x400000, 2103296, err);
-        exit(-1);
-    }
-    */
     prepare(argv[1], uc);
     hui();
 }
