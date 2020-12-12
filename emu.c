@@ -4,6 +4,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <capstone/capstone.h>
+#include <stdint.h>
 
 
 #define DISASM
@@ -41,18 +42,43 @@ const char* beautify(int flag, int type) {
 }
 
 
+typedef struct MapNode {
+    char* start;
+    char* end;
+    char* data;
+    bool mapped;
+    struct MapNode* next;
+} MapNode;
+
+static MapNode* maps = NULL;
+static MapNode* mapsEnd = NULL;
+
+void push(uc_engine* uc, void* val, int size) {
+
+}
+
+void init_stack(uc_engine* uc) {
+    char* start = (char*)-1;
+    for (MapNode* e = maps; e != NULL; e = e->next) {
+        if (e->start < start) start = e->start;
+    }
+    if ((uint64_t)start & 0xfff) {
+        start -= (uint64_t)start & 0xffff;
+    }
+    uc_err err;
+    err = uc_mem_map(uc, 0x0, start, UC_PROT_ALL);
+    if (err != UC_ERR_OK) {
+        printf("[!] init_stack error: %u (%s)\n", err, uc_strerror(err));
+        exit(-1);
+    }
+    uint64_t rsp = (uint64_t)start/2;
+    uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
+    printf("[*] Created stack from 0x%06x to %p with stack pointer = %p\n", 0, start, rsp);
+}
+
+
 //TODO
 void map_and_write(uc_engine* uc, char* addr, char* data, int len, bool flush) {
-    typedef struct MapNode {
-        char* start;
-        char* end;
-        char* data;
-        bool mapped;
-        struct MapNode* next;
-    } MapNode;
-
-    static MapNode* maps = NULL;
-    static MapNode* mapsEnd = NULL;
 
     if (addr != NULL && data != NULL && len != 0) {
         if (mapsEnd == NULL) {
@@ -93,17 +119,10 @@ void map_and_write(uc_engine* uc, char* addr, char* data, int len, bool flush) {
             if (e->start < start) start = e->start;
             if (e->end > end) end = e->end;
         }
-        unsigned long _start = start;
-        /* 
-        if (_start & 0x3ff) {
-            unsigned long old_start = start;
-            start -= (_start & 0x3ff);
-            printf("[*] Start (%p) is not divisible by 1024, changind to %p\n", old_start, start);
-        }
-        */
-        unsigned long len = end - start;
+        uint64_t _start = start;
+        uint64_t len = end - start;
         if (len & 0xfff) {
-            unsigned long old_len = len;
+            uint64_t old_len = len;
             len += 0x1000 - (len & 0xfff);
             printf("[*] Len (%d) is not divisible by 1024, changind to %d\n", old_len, len);
         }
@@ -114,10 +133,13 @@ void map_and_write(uc_engine* uc, char* addr, char* data, int len, bool flush) {
             exit(-1);
         }
         for (MapNode* e = maps; e != NULL; e=e->next) {
-            err = uc_mem_write(uc, e->start, e->data, e->end-e->start);
-            if (err != UC_ERR_OK) {
-                printf("[!] Failed on uc_mem_write() with error returned: %u(%s)\n", err, uc_strerror(err));
-                exit(-1);
+            if (!e->mapped) {
+                err = uc_mem_write(uc, e->start, e->data, e->end-e->start);
+                if (err != UC_ERR_OK) {
+                    printf("[!] Failed on uc_mem_write() with error returned: %u(%s)\n", err, uc_strerror(err));
+                    exit(-1);
+                }
+                e->mapped = true;
             }
         }
         puts("[*] Memory flushed (God bless)");
@@ -157,6 +179,7 @@ typedef struct Range {
     char* end;
 } Range;
 
+
 Range prepare(const char* fn, uc_engine* uc) {
     char* mem = get_file_contents(fn);
     Elf64_Ehdr* ehdr = mem;
@@ -182,6 +205,7 @@ Range prepare(const char* fn, uc_engine* uc) {
     char* entry = ehdr->e_entry;
     printf("[*] Entry point is at %p\n", entry);
     res.start = entry;
+    init_stack(uc);
     return res;
 }
 
