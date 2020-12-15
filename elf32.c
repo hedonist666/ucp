@@ -178,29 +178,35 @@ void read_regs(uc_engine* uc, Regs* regs) {
 
 int sig_handlers[1000];
 
+void show_tree_node(gpointer key, gpointer value) {
+    printf("%p: %p\n", key, value);
+}
 
-void interrupt(uc_engine* uc, uint32_t num, void* user_data) {
+void show_tree(GTree* tr) {
+    g_tree_foreach(tr, show_tree_node, NULL); 
+}
+
+
+void interrupt(uc_engine* uc, uint32_t num, GTree* skip_list) {
+    static Regs regs;
+    static uint32_t eip;
     printf("[*] Got interrupt: %d\n", num);
-    Regs regs;
     read_regs(uc, &regs);
     regs_dump(&regs);
     switch (num) {
         case 0x80:
             if (regs.eax == 0x30) {
-                sig_handlers[regs.ebx] = regs.ecx | 1;              
+                sig_handlers[regs.ebx] = regs.ecx; 
             }
             break;
         /* DUE TO UNICORN ISSUE WE MUST CHANGE EIP FROM HOOK_CODE */
-        /*
         case 0x3:
             if (sig_handlers[5]) {
-                uint32_t eip;
                 uc_reg_read(uc, UC_X86_REG_EIP, &eip);
                 eip += 1;
-                g_tree_insert(skip_list, &eip, &sig_handlers[5]);
+                g_tree_insert(skip_list, eip, sig_handlers[5]);
             }
             break;
-        */
     }
 }
 
@@ -214,6 +220,10 @@ void hook_code(uc_engine* uc, char* address, int size, GTree* skip_list) {
     int count;
     char data[size];
     uc_mem_read(uc, address, data, size);
+    if (address == NULL) {
+        puts("[*] Program finished, exiting");
+        exit(0);
+    }
     count = cs_disasm(handle, data, size, address, 0, &instr);
     if (count > 0) {
         printf(ANSI_COLOR_CYAN "0x%"PRIx32":" ANSI_COLOR_GREEN "\t%s" ANSI_COLOR_MAGENTA "\t\t%s" ANSI_COLOR_RESET "\n", instr->address, instr->mnemonic, instr->op_str);
@@ -225,20 +235,10 @@ void hook_code(uc_engine* uc, char* address, int size, GTree* skip_list) {
     if (!strcmp(instr->mnemonic, "syscall")) {
         puts("[!] OOOPS, syscall");
     }
-    uint32_t* jmp_p = g_tree_lookup(skip_list, address);
-    if (jmp_p != NULL) { 
-        uint32_t jmp = *jmp_p;
+    uint32_t jmp = g_tree_lookup(skip_list, address);
+    if (jmp != 0) { 
         printf("[*] Value is in skip list, jumping to %p\n", jmp);
-        uc_reg_write(uc, UC_X86_REG_EIP, jmp);
-    }
-    if (data[0] == '\xcc' && size == 1) {
-        if (sig_handlers[5]) {
-            uint32_t eip = 0;
-            uc_reg_read(uc, UC_X86_REG_EIP, &eip);
-            eip += 1;
-            g_tree_insert(skip_list, &eip, &sig_handlers[5]);
-            puts("ADDED TO TREE");
-        }
+        uc_reg_write(uc, UC_X86_REG_EIP, &jmp);
     }
     cs_free(instr, count);
 }
@@ -288,6 +288,11 @@ Range prepare(const char* fn, uc_engine* uc) {
 }
 
 
+gint dumb_compare(char* a1, char* a2) {
+    if (a1 > a2) return -1;
+    if (a2 > a1) return 1;
+    return 0;
+}
 
 
 int main(int argc, char** argv) {
@@ -303,9 +308,9 @@ int main(int argc, char** argv) {
         return -1;
     }
 #endif
-    GTree* skip_list = g_tree_new(g_int_equal);
+    GTree* skip_list = g_tree_new(dumb_compare);
     uc_hook_add(uc, &trace, UC_HOOK_CODE, hook_code, skip_list, 1, 0);
-    uc_hook_add(uc, &trap, UC_HOOK_INTR, interrupt, NULL, 1, 0);
+    uc_hook_add(uc, &trap, UC_HOOK_INTR, interrupt, skip_list, 1, 0);
     uc_emu_start(uc, rng.start, rng.end, 0, 0);
     hui();
     return 0;
