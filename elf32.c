@@ -6,6 +6,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <gmodule.h>
+#include <endian.h>
+#include <unistd.h>
 
 #define DISASM
 
@@ -89,6 +91,7 @@ void hexdump(uc_engine* uc, uint32_t addr, ssize_t size) {
             for (int i = 0; i < size; ++i) {
                 printf("%02hhx|", tmp[i]);   
             }
+            printf("\n");
             size = 0;
         }
     }
@@ -110,7 +113,7 @@ static MapNode* mapsEnd = NULL;
 
 void push(uc_engine* uc, uint32_t val) {
     uint32_t esp;
-    val = htonl(val);
+    //val = htobe32(val);
     uc_reg_read(uc, UC_X86_REG_ESP, &esp);
     esp -= 4;
     uc_mem_write(uc, esp, &val, 4);
@@ -283,6 +286,25 @@ void hook_interrupt(uc_engine* uc, uint32_t num, GTree* skip_list) {
             if (regs.eax == 0x30) {
                 sig_handlers[regs.ebx] = regs.ecx; 
             }
+            else if (regs.eax == 0x1) {
+                printf("[Syscall] exit...");
+                exit(regs.ebx);
+            }
+            else if (regs.eax == 0x3) {
+                char* buf = malloc(regs.edx);
+                printf("[Syscall] read(%d, %p, %d)\n", regs.ebx, regs.ecx, regs.edx); 
+                read(regs.ebx, buf, regs.edx);
+                uc_mem_write(uc, regs.ecx, buf, regs.edx);
+                free(buf);
+            }
+            else if (regs.eax == 0x4) {
+                char* buf = malloc(regs.edx);
+                uc_mem_read(uc, regs.ecx, buf, regs.edx);
+                printf("[Syscall] write(%d, %p (%s), %d)\n", regs.ebx, regs.ecx, buf, regs.edx); 
+                write(regs.ebx, buf, regs.edx);
+                puts("");
+                free(buf);
+            }
             break;
         /* DUE TO UNICORN ISSUE WE MUST CHANGE EIP FROM HOOK_CODE */
         case 0x3:
@@ -348,8 +370,11 @@ void hook_code(uc_engine* uc, char* address, int size, void* user_data)  {
 
 bool hook_mem_invalid(uc_engine *uc, uc_mem_type type,
         uint32_t address, int size, int32_t value, void *user_data) {
+    puts("[!] MEM INVALID");
     switch(type) {
         default:
+            printf("[!] Missing memory at 0x%"PRIx64 ", data size = %u, data value = 0x%"PRIx64 "\n",
+                    address, size, value);
             return false;
         case UC_MEM_WRITE_UNMAPPED:
             printf("[!] Missing memory is being WRITE at 0x%"PRIx64 ", data size = %u, data value = 0x%"PRIx64 "\n",
@@ -431,7 +456,7 @@ int main(int argc, char** argv) {
     init_skip_list(skip_list);
     uc_hook_add(uc, &trace, UC_HOOK_CODE, hook_code, skip_list, 1, 0);
     uc_hook_add(uc, &trap, UC_HOOK_INTR, hook_interrupt, skip_list, 1, 0);
-    uc_hook_add(uc, &invalid, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED, hook_mem_invalid, NULL, 1, 0);
+    uc_hook_add(uc, &invalid, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_UNMAPPED, hook_mem_invalid, NULL, 1, 0);
     uc_emu_start(uc, rng.start, rng.end, 0, 0);
     hui();
     return 0;
